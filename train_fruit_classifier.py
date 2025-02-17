@@ -1,4 +1,4 @@
-# train_fruit_classifier.py
+# train_fruit_classifier_lite.py
 
 import os
 import pandas as pd
@@ -15,18 +15,17 @@ import numpy as np
 # ----------------------------
 # Configuration Parameters
 # ----------------------------
-DATASET_DIR = "original_data_set"  # <-- UPDATE this to your dataset root folder
+DATASET_DIR = "original_data_set"  # Root folder with subfolders for each class (e.g., freshapples, rottenapples, etc.)
 IMG_HEIGHT = 150
 IMG_WIDTH = 150
 BATCH_SIZE = 32
-INITIAL_EPOCHS = 20  # Initial training with the base model frozen
+INITIAL_EPOCHS = 20  # Initial training epochs with base model frozen
 FINE_TUNE_EPOCHS = 15  # Fine-tuning epochs
-FINE_TUNE_AT = 50  # Unfreeze layers from this index onward (lower than before to allow more adaptation)
+FINE_TUNE_AT = 50  # Unfreeze layers from this index onward
 
 # ----------------------------
 # Prepare the DataFrame
 # ----------------------------
-# Loop through each subfolder and assign a label based on folder name.
 data = []
 for subfolder in os.listdir(DATASET_DIR):
     folder_path = os.path.join(DATASET_DIR, subfolder)
@@ -39,15 +38,13 @@ for subfolder in os.listdir(DATASET_DIR):
         elif "orange" in subfolder_lower:
             label = "orange"
         else:
-            continue  # Skip folders that don't match our classes
+            continue
 
-        # Loop through image files in the folder
         for file in os.listdir(folder_path):
             if file.lower().endswith((".jpg", ".jpeg", ".png", ".bmp")):
                 file_path = os.path.join(folder_path, file)
                 data.append([file_path, label])
 
-# Create a DataFrame with columns "filename" and "class"
 df = pd.DataFrame(data, columns=["filename", "class"])
 print("Total images found:", len(df))
 print("Class distribution:\n", df["class"].value_counts())
@@ -67,7 +64,7 @@ train_datagen = ImageDataGenerator(
     rotation_range=20,
     width_shift_range=0.2,
     height_shift_range=0.2,
-    shear_range=0.15,  # Added shear to slightly distort images
+    shear_range=0.15,
     brightness_range=[0.8, 1.2],
     zoom_range=0.2,
     horizontal_flip=True,
@@ -83,7 +80,6 @@ train_generator = train_datagen.flow_from_dataframe(
     class_mode="categorical",
     shuffle=True,
 )
-
 validation_generator = val_datagen.flow_from_dataframe(
     dataframe=val_df,
     x_col="filename",
@@ -94,29 +90,25 @@ validation_generator = val_datagen.flow_from_dataframe(
     shuffle=False,
 )
 
-# Print the class indices mapping (expected to be something like: {'apple': 0, 'banana': 1, 'orange': 2})
 print("Class Indices:", train_generator.class_indices)
 
 # ----------------------------
 # Build the Transfer Learning Model (Initial Stage)
 # ----------------------------
-# Load MobileNetV2 (without top layers) pre-trained on ImageNet.
 base_model = MobileNetV2(
     input_shape=(IMG_HEIGHT, IMG_WIDTH, 3), include_top=False, weights="imagenet"
 )
-base_model.trainable = False  # Freeze the base model initially
+base_model.trainable = False
 
-# Add custom classification layers on top.
 x = base_model.output
 x = GlobalAveragePooling2D()(x)
 x = Dense(128, activation="relu")(x)
 x = Dropout(0.5)(x)
-predictions = Dense(3, activation="softmax")(x)  # Three classes: apple, banana, orange
+predictions = Dense(3, activation="softmax")(x)
 
 model = Model(inputs=base_model.input, outputs=predictions)
 
 model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-
 model.summary()
 
 # ----------------------------
@@ -133,18 +125,15 @@ history_initial = model.fit(
 # ----------------------------
 # Fine-Tuning: Unfreeze Some Base Model Layers
 # ----------------------------
-# Unfreeze layers from FINE_TUNE_AT onward so the model can adjust to your data.
 base_model.trainable = True
 for layer in base_model.layers[:FINE_TUNE_AT]:
     layer.trainable = False
 
-# Recompile the model with a lower learning rate.
 model.compile(
     optimizer=tf.keras.optimizers.Adam(1e-5),
     loss="categorical_crossentropy",
     metrics=["accuracy"],
 )
-
 model.summary()
 
 history_fine = model.fit(
@@ -174,7 +163,19 @@ plt.title("Confusion Matrix on Validation Set")
 plt.show()
 
 # ----------------------------
-# Save the Final Model
+# Save the Final Model in H5 format
 # ----------------------------
 model.save("fruit_classifier.h5")
 print("Model saved as 'fruit_classifier.h5'")
+
+# ----------------------------
+# Convert the Final Model to TensorFlow Lite
+# ----------------------------
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+# Optional: Enable optimization (e.g., default optimization for quantization)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+tflite_model = converter.convert()
+
+with open("fruit_classifier.tflite", "wb") as f:
+    f.write(tflite_model)
+print("Model converted to TFLite and saved as 'fruit_classifier.tflite'")

@@ -1,112 +1,80 @@
+#!/usr/bin/env python3
 import cv2
 import numpy as np
 import time
-from tensorflow.keras.models import load_model
+import tensorflow as tf
 
 # ----------------------------
-# Configuration and Model Loading
+# Configuration and TFLite Model Loading
 # ----------------------------
-MODEL_PATH = "fruit_classifier.h5"  # Update if needed
+MODEL_PATH = "fruit_classifier.tflite"  # Ensure this file is in the same directory
+IMG_WIDTH = 150
+IMG_HEIGHT = 150
 
-# If you need the custom InputLayer workaround, uncomment and modify the next lines:
-# class CustomInputLayer(tf.keras.layers.InputLayer):
-#     @classmethod
-#     def from_config(cls, config):
-#         if "batch_shape" in config:
-#             config["batch_input_shape"] = config.pop("batch_shape")
-#         return super(CustomInputLayer, cls).from_config(config)
-#
-# model = load_model(MODEL_PATH, custom_objects={"InputLayer": CustomInputLayer})
-model = load_model(MODEL_PATH)
+# Load the TFLite model using TensorFlow's built-in TFLite Interpreter
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
+
+# Retrieve input and output tensor details
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
 # Map predicted indices to fruit names (assumes alphabetical ordering: apple, banana, orange)
 idx_to_class = {0: "apple", 1: "banana", 2: "orange"}
 
-# Expected input size for the model
-IMG_WIDTH = 150
-IMG_HEIGHT = 150
 
-# ----------------------------
-# Initialize Webcam and Background Subtractor
-# ----------------------------
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Could not open webcam.")
-    exit()
+def capture_and_classify():
+    # Open the webcam only when triggered
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open the webcam.")
+        return
 
-# Use a background subtractor to detect motion
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-    history=500, varThreshold=16, detectShadows=True
-)
-motion_threshold = 5000  # Adjust based on your environment
-
-# Flags for detection
-detection_mode = False
-detection_start_time = None
-
-print("System armed. Waiting for an object to enter the frame... (Press 'q' to quit)")
-
-while True:
     ret, frame = cap.read()
+    cap.release()
     if not ret:
-        break
+        print("Error: Could not capture an image.")
+        return
 
-    # Apply background subtraction to detect motion
-    fg_mask = bg_subtractor.apply(frame)
-    motion_amount = np.sum(fg_mask) / 255  # counts white pixels in the mask
+    # Pre-process the frame
+    resized_frame = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
+    rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+    normalized_frame = rgb_frame.astype("float32") / 255.0
+    input_array = np.expand_dims(normalized_frame, axis=0)
 
-    # If an object enters the frame (motion detected) and we're not already in detection mode:
-    if not detection_mode and motion_amount > motion_threshold:
-        detection_mode = True
-        detection_start_time = time.time()
-        print("Object detected. Waiting 3 seconds before classification...")
+    # Run inference with the TFLite model
+    interpreter.set_tensor(input_details[0]["index"], input_array)
+    interpreter.invoke()
+    predictions = interpreter.get_tensor(output_details[0]["index"])
 
-    # Once in detection mode, wait until 3 seconds have passed.
-    if detection_mode and (time.time() - detection_start_time) >= 3:
-        # Capture the frame for classification
-        resized_frame = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
-        rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-        normalized_frame = rgb_frame.astype("float32") / 255.0
-        input_array = np.expand_dims(normalized_frame, axis=0)
+    predicted_index = int(np.argmax(predictions, axis=1)[0])
+    predicted_class = idx_to_class.get(predicted_index, "unknown")
+    confidence = predictions[0][predicted_index]
+    result_text = f"{predicted_class}: {confidence*100:.2f}%"
+    print("Classification result:", result_text)
 
-        # Perform classification
-        predictions = model.predict(input_array)
-        predicted_index = int(np.argmax(predictions, axis=1)[0])
-        predicted_class = idx_to_class.get(predicted_index, "Unknown")
-        confidence = predictions[0][predicted_index]
-        result_text = f"{predicted_class}: {confidence*100:.2f}%"
-        print("Classification result:", result_text)
+    # Optionally, display the captured image with the classification result overlayed
+    cv2.putText(
+        frame, result_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
+    )
+    cv2.imshow("Result", frame)
+    cv2.waitKey(3000)
+    cv2.destroyAllWindows()
 
-        # Overlay the result on the frame and display it for 3 seconds
-        cv2.putText(
-            frame, result_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
-        )
-        cv2.imshow("Result", frame)
-        cv2.waitKey(3000)  # display result for 3 seconds
 
-        # After classification, wait for the object to leave the frame before re-arming.
-        print("Waiting for object to leave the frame...")
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            fg_mask = bg_subtractor.apply(frame)
-            motion_amount = np.sum(fg_mask) / 255
-            cv2.imshow("Webcam", frame)
-            if motion_amount < motion_threshold:
-                detection_mode = False  # re-arm detection
-                print("Frame is clear. System re-armed.")
-                break
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                detection_mode = False
-                break
+def main():
+    print("System ready. Type 't' to trigger classification, or 'q' to quit.")
+    while True:
+        user_input = input("Enter command (t = trigger, q = quit): ").strip().lower()
+        if user_input == "q":
+            print("Exiting...")
+            break
+        elif user_input == "t":
+            print("Trigger received. Capturing image...")
+            capture_and_classify()
+        else:
+            print("Invalid command. Please type 't' or 'q'.")
 
-    # Show the live webcam feed and the motion mask for debugging (optional)
-    cv2.imshow("Webcam", frame)
-    cv2.imshow("Motion Mask", fg_mask)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
