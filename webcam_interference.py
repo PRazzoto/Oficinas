@@ -1,112 +1,93 @@
+#!/usr/bin/env python3
 import cv2
 import numpy as np
 import time
-from tensorflow.keras.models import load_model
+import serial
+import tensorflow as tf
 
 # ----------------------------
-# Configuration and Model Loading
+# Configuration Parameters
 # ----------------------------
-MODEL_PATH = "fruit_classifier.h5"  # Update if needed
-
-# If you need the custom InputLayer workaround, uncomment and modify the next lines:
-# class CustomInputLayer(tf.keras.layers.InputLayer):
-#     @classmethod
-#     def from_config(cls, config):
-#         if "batch_shape" in config:
-#             config["batch_input_shape"] = config.pop("batch_shape")
-#         return super(CustomInputLayer, cls).from_config(config)
-#
-# model = load_model(MODEL_PATH, custom_objects={"InputLayer": CustomInputLayer})
-model = load_model(MODEL_PATH)
-
-# Map predicted indices to fruit names (assumes alphabetical ordering: apple, banana, orange)
-idx_to_class = {0: "apple", 1: "banana", 2: "orange"}
-
-# Expected input size for the model
+MODEL_PATH = "fruit_classifier.tflite"  # TFLite model file
 IMG_WIDTH = 150
 IMG_HEIGHT = 150
 
+SERIAL_PORT = "/dev/ttyACM0"  # Adjust if necessary (e.g., /dev/ttyUSB0)
+BAUD_RATE = 9600
+
 # ----------------------------
-# Initialize Webcam and Background Subtractor
+# Load TFLite Model
+# ----------------------------
+interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Mapping from predicted index to fruit name (alphabetical order assumed)
+idx_to_class = {0: "apple", 1: "banana", 2: "orange"}
+
+# ----------------------------
+# Setup Serial Communication with Arduino
+# ----------------------------
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2)  # Wait for the connection to stabilize
+    print("Serial connection established on", SERIAL_PORT)
+except Exception as e:
+    print("Error opening serial port:", e)
+    exit()
+
+# ----------------------------
+# Initialize Webcam
 # ----------------------------
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
-    print("Error: Could not open webcam.")
+    print("Error: Could not open the webcam.")
+    ser.close()
     exit()
 
-# Use a background subtractor to detect motion
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-    history=500, varThreshold=16, detectShadows=True
-)
-motion_threshold = 5000  # Adjust based on your environment
+print("Raspberry Pi ready. Waiting for trigger from Arduino...")
 
-# Flags for detection
-detection_mode = False
-detection_start_time = None
-
-print("System armed. Waiting for an object to enter the frame... (Press 'q' to quit)")
-
+# ----------------------------
+# Main Loop: Wait for Trigger from Arduino
+# ----------------------------
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # Apply background subtraction to detect motion
-    fg_mask = bg_subtractor.apply(frame)
-    motion_amount = np.sum(fg_mask) / 255  # counts white pixels in the mask
-
-    # If an object enters the frame (motion detected) and we're not already in detection mode:
-    if not detection_mode and motion_amount > motion_threshold:
-        detection_mode = True
-        detection_start_time = time.time()
-        print("Object detected. Waiting 3 seconds before classification...")
-
-    # Once in detection mode, wait until 3 seconds have passed.
-    if detection_mode and (time.time() - detection_start_time) >= 3:
-        # Capture the frame for classification
-        resized_frame = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
-        rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-        normalized_frame = rgb_frame.astype("float32") / 255.0
-        input_array = np.expand_dims(normalized_frame, axis=0)
-
-        # Perform classification
-        predictions = model.predict(input_array)
-        predicted_index = int(np.argmax(predictions, axis=1)[0])
-        predicted_class = idx_to_class.get(predicted_index, "Unknown")
-        confidence = predictions[0][predicted_index]
-        result_text = f"{predicted_class}: {confidence*100:.2f}%"
-        print("Classification result:", result_text)
-
-        # Overlay the result on the frame and display it for 3 seconds
-        cv2.putText(
-            frame, result_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
-        )
-        cv2.imshow("Result", frame)
-        cv2.waitKey(3000)  # display result for 3 seconds
-
-        # After classification, wait for the object to leave the frame before re-arming.
-        print("Waiting for object to leave the frame...")
-        while True:
+    if ser.in_waiting > 0:
+        # Read incoming serial data (strip newline)
+        line = ser.readline().decode("utf-8").strip()
+        print("Received from Arduino:", line)
+        if line == "TRIGGER":
+            print("Trigger received. Capturing image for classification...")
+            # Open the webcam, capture a single frame, then release (to keep system light)
             ret, frame = cap.read()
             if not ret:
-                break
-            fg_mask = bg_subtractor.apply(frame)
-            motion_amount = np.sum(fg_mask) / 255
-            cv2.imshow("Webcam", frame)
-            if motion_amount < motion_threshold:
-                detection_mode = False  # re-arm detection
-                print("Frame is clear. System re-armed.")
-                break
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                detection_mode = False
-                break
+                print("Error: Could not capture frame.")
+                continue
 
-    # Show the live webcam feed and the motion mask for debugging (optional)
-    cv2.imshow("Webcam", frame)
-    cv2.imshow("Motion Mask", fg_mask)
+            # Preprocess the captured frame
+            resized_frame = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
+            rgb_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+            normalized_frame = rgb_frame.astype("float32") / 255.0
+            input_array = np.expand_dims(normalized_frame, axis=0)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+            # Run inference using the TFLite model
+            interpreter.set_tensor(input_details[0]["index"], input_array)
+            interpreter.invoke()
+            predictions = interpreter.get_tensor(output_details[0]["index"])
+            predicted_index = int(np.argmax(predictions, axis=1)[0])
+            predicted_class = idx_to_class.get(predicted_index, "unknown")
+            confidence = predictions[0][predicted_index]
+            print(
+                "Classification result:", predicted_class, "with confidence", confidence
+            )
 
+            # Send the classification result (as a number: 0, 1, or 2) back to the Arduino
+            ser.write((str(predicted_index) + "\n").encode("utf-8"))
+            print("Sent to Arduino:", predicted_index)
+
+    # Small delay to avoid busy looping
+    time.sleep(0.1)
+
+# Cleanup (in case of exit)
 cap.release()
-cv2.destroyAllWindows()
+ser.close()
