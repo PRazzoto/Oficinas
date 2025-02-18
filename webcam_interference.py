@@ -8,12 +8,12 @@ import tensorflow as tf
 # ----------------------------
 # Configuration Parameters
 # ----------------------------
-MODEL_PATH = "fruit_classifier.tflite"  # TFLite model file
+MODEL_PATH = "fruit_classifier.tflite"
 IMG_WIDTH = 150
 IMG_HEIGHT = 150
 
-SERIAL_PORT = "/dev/ttyACM0"  # Adjust if necessary (e.g., /dev/ttyUSB0)
-BAUD_RATE = 9600
+SERIAL_PORT = "COM5"
+BAUD_RATE = 115200
 
 # ----------------------------
 # Load TFLite Model
@@ -82,8 +82,8 @@ while True:
             )
 
             # Send the classification result (as a number: 0, 1, or 2) back to the Arduino
-            ser.write((str(predicted_index) + "\n").encode("utf-8"))
-            print("Sent to Arduino:", predicted_index)
+            ser.write(("F" + str(predicted_index + 1) + "\n").encode("utf-8"))
+            print("Sent to Arduino:", "F" + str(predicted_index + 1))
 
     # Small delay to avoid busy looping
     time.sleep(0.1)
