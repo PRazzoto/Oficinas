@@ -4,16 +4,22 @@ import numpy as np
 import time
 import serial
 import tensorflow as tf
+import os
 
 # ----------------------------
 # Configuration Parameters
 # ----------------------------
-MODEL_PATH = "fruit_classifier.tflite"
+MODEL_PATH = "fruit_classifier.tflite"  # Ensure this file is in the same directory
 IMG_WIDTH = 150
 IMG_HEIGHT = 150
-
-SERIAL_PORT = "COM5"
+SERIAL_PORT = "/dev/ttyACM0"  # On Windows; on Linux, use /dev/ttyACM0 or /dev/ttyUSB0
 BAUD_RATE = 115200
+delay_after_trigger = 2  # Delay in seconds after a classification is done
+
+# Directory to save evaluated images
+SAVE_DIR = "evaluated_images"
+if not os.path.exists(SAVE_DIR):
+    os.makedirs(SAVE_DIR)
 
 # ----------------------------
 # Load TFLite Model
@@ -23,7 +29,7 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Mapping from predicted index to fruit name (alphabetical order assumed)
+# Mapping from predicted index to fruit name (assumes alphabetical order: apple, banana, orange)
 idx_to_class = {0: "apple", 1: "banana", 2: "orange"}
 
 # ----------------------------
@@ -37,19 +43,10 @@ except Exception as e:
     print("Error opening serial port:", e)
     exit()
 
-# ----------------------------
-# Initialize Webcam
-# ----------------------------
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Could not open the webcam.")
-    ser.close()
-    exit()
-
-print("Raspberry Pi ready. Waiting for trigger from Arduino...")
+print("Computer ready. Waiting for trigger from Arduino...")
 
 # ----------------------------
-# Main Loop: Wait for Trigger from Arduino
+# Main Loop: Wait for Trigger from Arduino and Process Frame
 # ----------------------------
 while True:
     if ser.in_waiting > 0:
@@ -58,11 +55,23 @@ while True:
         print("Received from Arduino:", line)
         if line == "TRIGGER":
             print("Trigger received. Capturing image for classification...")
-            # Open the webcam, capture a single frame, then release (to keep system light)
+
+            # Open the webcam only when triggered, capture a frame, then release it
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                print("Error: Could not open webcam.")
+                continue
             ret, frame = cap.read()
+            cap.release()  # Release webcam immediately
             if not ret:
                 print("Error: Could not capture frame.")
                 continue
+
+            # Save the captured frame with a timestamp
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            save_path = os.path.join(SAVE_DIR, f"image_{timestamp}.jpg")
+            cv2.imwrite(save_path, frame)
+            print("Saved evaluated image to:", save_path)
 
             # Preprocess the captured frame
             resized_frame = cv2.resize(frame, (IMG_WIDTH, IMG_HEIGHT))
@@ -82,12 +91,16 @@ while True:
             )
 
             # Send the classification result (as a number: 0, 1, or 2) back to the Arduino
-            ser.write(("F" + str(predicted_index + 1) + "\n").encode("utf-8"))
-            print("Sent to Arduino:", "F" + str(predicted_index + 1))
+            result_to_send = "F" + str(predicted_index + 1) + "\n"
+            ser.write(result_to_send.encode("utf-8"))
+            print("Sent to Arduino:", result_to_send.strip())
+
+            # Wait for a specified delay before processing the next trigger
+            print(f"Waiting {delay_after_trigger} seconds before next capture...")
+            time.sleep(delay_after_trigger)
 
     # Small delay to avoid busy looping
     time.sleep(0.1)
 
-# Cleanup (in case of exit)
-cap.release()
+# Cleanup (if loop ever exits)
 ser.close()
